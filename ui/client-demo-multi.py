@@ -20,6 +20,7 @@ def application(app_number, app_type, first_name, last_name, address, invoice, r
     container = db.create_container_if_not_exists(id=CONTAINER_ID,partition_key=PartitionKey(path='/id', kind='Hash'))
 
     app_item = {
+        '/id': app_number, # Partition key
         'id': app_number,
         'type': app_type,
         'first_name': first_name,

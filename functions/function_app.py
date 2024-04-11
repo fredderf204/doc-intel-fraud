@@ -7,15 +7,14 @@ from openai import AzureOpenAI
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.storage.blob import BlobClient
+from azure.cosmos import CosmosClient, PartitionKey
 
 app = func.FunctionApp()
 
 @app.blob_trigger(arg_name="inblobtrig", path="invoice/{name}", connection="mfdocintell_STORAGE")
-@app.cosmos_db_input(arg_name="inputDocument", database_name= "ToDoList", container_name="Items", connection = "cosmosdb_config")
-@app.cosmos_db_output(arg_name="outputDocument", database_name="ToDoList", container_name="Items", connection ="cosmosdb_config")
 @app.blob_output(arg_name="outputblob", path="processed/{name}", connection="mfdocintell_STORAGE")
 
-def invoice(inblobtrig: func.InputStream, inputDocument: func.DocumentList, outputDocument: func.Out[func.Document], outputblob: func.Out[str]):
+def invoice(inblobtrig: func.InputStream, outputblob: func.Out[str]):
     
     # Extract the invoice number from the blob name
     application_number = re.search(r'^invoice\/(\d+)-invoice\.pdf$', inblobtrig.name).group(1)
@@ -222,13 +221,30 @@ def invoice(inblobtrig: func.InputStream, inputDocument: func.DocumentList, outp
     invoice_data["invoice_status"] = "Invoice processed successfully." 
 
     # Save extracted invoice data to Cosmos DB
-    doc = next((x for x in inputDocument if x["id"] == application_number), None)
-    doc.data["invoice"] = invoice_data
+    #doc = next((x for x in inputDocument if x["id"] == application_number), None)
+    #doc.data["invoice"] = invoice_data
 
-    if doc.get("receipt"):
-        doc.data["receipt"] = doc.get("receipt")
+    #if doc.get("receipt"):
+    #    doc.data["receipt"] = doc.get("receipt")
 
-    outputDocument.set(doc)
+    # Get cosmosdb record and replace the updated document to Cosmos DB if _etag matches
+    client = CosmosClient.from_connection_string(os.getenv("cosmosdb_config"))
+    database = client.get_database_client("ToDoList")
+    container = database.get_container_client("docs")
+    doc = container.read_item(item=application_number, partition_key=application_number)
+    item_etag = doc["_etag"]
+    doc["invoice"] = invoice_data
+    try:
+        container.replace_item(doc, doc, if_match=item_etag)
+    except:
+        doc = container.read_item(item=application_number, partition_key=application_number)
+        item_etag = doc["_etag"]
+        doc["invoice"] = invoice_data
+        container.replace_item(doc, doc, if_match=item_etag)
+
+    # Save the updated document to Cosmos DB if _etag matches
+    #####
+    #outputDocument.set(doc)
 
     # Move the blob to the processed container
     outputblob.set(inblobtrig.read())
@@ -241,11 +257,9 @@ def invoice(inblobtrig: func.InputStream, inputDocument: func.DocumentList, outp
     return
 
 @app.blob_trigger(arg_name="recblobtrig", path="receipt/{name}", connection="mfdocintell_STORAGE")
-@app.cosmos_db_input(arg_name="recinputDocument", database_name= "ToDoList", container_name="Items", connection = "cosmosdb_config")
-@app.cosmos_db_output(arg_name="recoutputDocument", database_name="ToDoList", container_name="Items", connection ="cosmosdb_config")
 @app.blob_output(arg_name="outputblob", path="processed/{name}", connection="mfdocintell_STORAGE")
 
-def receipt(recblobtrig: func.InputStream, recinputDocument: func.DocumentList, recoutputDocument: func.Out[func.Document], outputblob: func.Out[str]):
+def receipt(recblobtrig: func.InputStream, outputblob: func.Out[str]):
     
     # Extract the receipt number from the blob name
     application_number = re.search(r'^receipt\/(\d+)-receipt\.[A-Za-z]+$', recblobtrig.name).group(1)
@@ -300,7 +314,7 @@ def receipt(recblobtrig: func.InputStream, recinputDocument: func.DocumentList, 
 
                 item_price = item.value.get("Price")
                 if item_price:
-                    items[f"item_{idx}_price"] = str(item_price.value.code) + " $" + str(item_price.value.amount)
+                    items[f"item_{idx}_price"] = str(item_price) + " $" + str(item_price.value.amount)
                     items[f"item_{idx}_price_confidence"] = item_price.confidence
 
                 item_total_price = item.value.get("TotalPrice")
@@ -333,13 +347,28 @@ def receipt(recblobtrig: func.InputStream, recinputDocument: func.DocumentList, 
     receipt_data["receipt_status"] = "Receipt processed successfully." 
 
     # Save extracted receipt data to Cosmos DB
-    doc = next((x for x in recinputDocument if x["id"] == application_number), None)
-    doc.data["receipt"] = receipt_data
+    #doc = next((x for x in recinputDocument if x["id"] == application_number), None)
+    #doc.data["receipt"] = receipt_data
 
-    if doc.get("invoice"):
-        doc.data["invoice"] = doc.get("invoice")
+    #if doc.get("invoice"):
+    #    doc.data["invoice"] = doc.get("invoice")
 
-    recoutputDocument.set(doc)
+    #recoutputDocument.set(doc)
+
+    # Get cosmosdb record and replace the updated document to Cosmos DB if _etag matches
+    client = CosmosClient.from_connection_string(os.getenv("cosmosdb_config"))
+    database = client.get_database_client("ToDoList")
+    container = database.get_container_client("docs")
+    doc = container.read_item(item=application_number, partition_key=application_number)
+    item_etag = doc["_etag"]
+    doc["receipt"] = receipt_data
+    try:
+        container.replace_item(doc, doc, if_match=item_etag)
+    except:
+        doc = container.read_item(item=application_number, partition_key=application_number)
+        item_etag = doc["_etag"]
+        doc["receipt"] = receipt_data
+        container.replace_item(doc, doc, if_match=item_etag)
 
     # Move the blob to the processed container
     outputblob.set(recblobtrig.read())
@@ -351,8 +380,8 @@ def receipt(recblobtrig: func.InputStream, recinputDocument: func.DocumentList, 
 
     return
 
-@app.cosmos_db_trigger(arg_name="costrig", connection="cosmosdb_config", database_name="ToDoList", container_name="Items")
-@app.cosmos_db_output(arg_name="compareDocument", database_name="ToDoList", container_name="Items", connection ="cosmosdb_config", lease_container_name="leases", create_if_not_exists=True)
+@app.cosmos_db_trigger(arg_name="costrig", connection="cosmosdb_config", database_name="ToDoList", container_name="docs")
+@app.cosmos_db_output(arg_name="compareDocument", database_name="ToDoList", container_name="docs", connection ="cosmosdb_config", lease_container_name="leases", create_if_not_exists=True)
 
 def fraud(costrig: func.DocumentList, compareDocument: func.Out[func.Document]):
     # Check to see if the document has both an invoice and receipt data
